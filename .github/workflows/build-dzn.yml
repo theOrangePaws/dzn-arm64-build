@@ -1,0 +1,62 @@
+name: build-dzn-arm64
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tools
+        shell: pwsh
+        run: |
+          pip install meson ninja mako pyyaml packaging
+          choco install winflexbison3 -y --no-progress
+          echo "C:\ProgramData\chocolatey\lib\winflexbison3\tools" | Out-File -Append $env:GITHUB_PATH -Encoding utf8
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: Get Mesa
+        shell: pwsh
+        run: git clone --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git mesa
+
+      - name: Patch dzn
+        shell: pwsh
+        run: python patch_dzn.py mesa
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cd mesa
+          meson setup build --buildtype=release -Dvulkan-drivers=microsoft-experimental -Dgallium-drivers= -Dllvm=disabled -Dmicrosoft-clc=disabled -Dspirv-to-dxil=true -Dbuild-tests=false -Dxmlconfig=disabled -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled -Dgbm=disabled
+          if ($LASTEXITCODE -ne 0) { Get-Content build/meson-logs/meson-log.txt -Tail 80; exit 1 }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cd mesa
+          ninja -C build src/microsoft/vulkan/vulkan_dzn.dll
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          mkdir out
+          Copy-Item (Get-ChildItem mesa/build -Recurse -Filter vulkan_dzn.dll | Select-Object -First 1).FullName out/
+          gh release download --repo microsoft/DirectXShaderCompiler --pattern "dxc_*.zip" --dir dxc
+          Expand-Archive dxc/*.zip dxc/x
+          Copy-Item (Get-ChildItem dxc/x -Recurse -Filter dxil.dll | Where-Object { $_.FullName -match "arm64" } | Select-Object -First 1).FullName out/
+          '{"file_format_version":"1.0.1","ICD":{"library_path":".\\vulkan_dzn.dll","api_version":"1.2.0"}}' | Out-File out/dzn_icd.arm64.json -Encoding ascii
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dzn-arm64
+          path: out/
